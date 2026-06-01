@@ -20,9 +20,11 @@ Scripts converted from the notebooks - with minor tweaks.
 
 From the project root:
 
+```bash
 chmod +x test.sh run.sh
 ./test.sh   # runs demo mode checks
 ./run.sh    # runs full analysis
+```
 
 #### For the Curious...
 
