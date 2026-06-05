@@ -7,8 +7,12 @@ if [ ! -d "venv" ]; then
   python3 -m venv venv
 fi
 
-# Activate venv
-source venv/bin/activate
+# Activate venv (Works on both Windows Git Bash and Linux)
+if [ -d "venv/Scripts" ]; then
+  source venv/Scripts/activate
+else
+  source venv/bin/activate
+fi
 
 # Run full analysis
 echo "[info] Running Expert analysis..."

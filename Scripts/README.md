@@ -18,13 +18,15 @@ Scripts converted from the notebooks - with minor tweaks.
 
 ### The Easy Way
 
-From the project root:
+From the project root, type/paste in order:
 
 ```bash
-chmod +x test.sh run.sh
+chmod +x test.sh run.sh # Give yourself execute permissons
 ./test.sh   # runs demo mode checks
 ./run.sh    # runs full analysis
 ```
+
+**Note for Windows Users**: Git Bash must be run as admin because Windows handles permissions to temp folders differently 💀. It's a feature, not a bug (promise).
 
 #### For the Curious...
 
@@ -36,6 +38,24 @@ Both the `.sh` scripts create a venv and activate it.
 ***
 
 ### Manual Runs
+
+#### Suggested Running Sequence
+
+From the project root, type/paste in order:
+
+```bash
+python3 -m venv venv      # Create a virtual environment (venv)
+source venv/bin/activate  # Activate the venv
+
+python 1/Pre_and_Post_GPT_Writing_Styles_01_Expert.py --use-fake-data --print-architecture --print-assignments  # Demo run + print architecture and assignment text (to separate files) using the fake data (can do the same for 2/Pre_and_Post_GPT_Writing_Styles_02_ML.py but they use the same directory)
+
+python 1/Pre_and_Post_GPT_Writing_Styles_01_Expert.py  # Real-data run of the first script
+python 2/Pre_and_Post_GPT_Writing_Styles_02_ML.py      # Real-data run of the second script
+```
+
+***
+
+#### Reference: The Full Version
 
 Assumption: The venv is created and activated. All commands below use relative paths runnable from the root.
 

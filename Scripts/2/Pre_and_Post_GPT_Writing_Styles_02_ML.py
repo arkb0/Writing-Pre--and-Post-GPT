@@ -19,7 +19,28 @@ from typing import Any, Iterator, Protocol
 # =============================================================================
 
 def _pip(*args):
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', *args])
+    import threading
+    import itertools
+
+    done  = threading.Event()
+    frames = itertools.cycle(['-', '\\', '|', '/'])
+
+    def _spin():
+        while not done.wait(0.1):
+            print(f'\r  installing... {next(frames)}', end='', flush=True)
+
+    t = threading.Thread(target=_spin, daemon=True)
+    t.start()
+    try:
+        subprocess.check_call(
+            [sys.executable, '-m', 'pip', 'install', '--quiet', *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    finally:
+        done.set()
+        t.join()
+        print('\r  installing... done.   ')
 
 _pip(
     'nltk>=3.8', 'spacy>=3.7', 'numpy>=1.26', 'pandas>=2.1',
@@ -99,7 +120,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--print-assignments', '-p',
         action='store_true',
-        help='Print the first assignment (first student) from each semester.',
+        help='Print the first assignment (first student, last submission for the student if they have multiple pdfs) from each semester.',
     )
     return parser.parse_args()
 
@@ -173,7 +194,10 @@ class EssayRecord:
 # =============================================================================
 
 _FOLDER_RE = re.compile(
-    r'^(?P<yyyymm>\d{6})-(?P<course_slug>.+?)_\((?P<code>[A-Z]{2}\d{2})\)-(?P<canvas_id>\d+)$'
+    r'^(?P<yyyymm>\d{6})'
+    r'-(?P<course_slug>.+?)'
+    r'(?:_\((?P<code>(?:SP|SU|FA)\d{2})\))?'
+    r'-(?P<canvas_id>\d+)$'
 )
 
 
@@ -259,14 +283,14 @@ def iter_essay_records(semesters: list[Semester]) -> Iterator[EssayRecord]:
                 if len(pdfs) > 1:
                     print(
                         f'  [warn] multiple PDFs in {student_dir}; '
-                        f'using first alphabetically'
+                        f'using the last alphabetically' # Change the message here if needed
                     )
                 yield EssayRecord(
                     semester     = sem,
                     assignment   = assignment,
                     student_id   = student_id,
                     student_name = student_name,
-                    pdf_path     = sorted(pdfs)[0],
+                    pdf_path     = sorted(pdfs)[-1], # 0 for first, -1 for last
                 )
 
 # =============================================================================
@@ -484,7 +508,7 @@ def summarise_corpus(records: list[EssayRecord]) -> pd.DataFrame:
 # 11. Diagnostic helpers
 # =============================================================================
 
-def print_architecture(data_root: Path) -> None:
+def print_architecture_terminal(data_root: Path) -> None:
     """
     Print an ASCII directory tree of *data_root*.
     Only folder and file names are shown; file contents are not read.
@@ -507,14 +531,36 @@ def print_architecture(data_root: Path) -> None:
     print()
 
 
-def print_assignments(
-    semesters: list[Semester],
-    records:   list[EssayRecord],
+def print_architecture(data_root: Path) -> None:
+    out_path = OUTPUT_DIR / 'structure.txt'
+    lines: list[str] = []
+    lines.append(f'[DIR]  {data_root.resolve()}/')
+
+    def _walk(path: Path, prefix: str = '') -> None:
+        entries = sorted(path.iterdir())
+        for i, entry in enumerate(entries):
+            connector  = '|-- '
+            extension  = '|   ' if i < len(entries) - 1 else '    '
+            tag        = '[DIR] ' if entry.is_dir() else '[FILE]'
+            suffix     = '/' if entry.is_dir() else ''
+            lines.append(f'{prefix}{connector}{tag}  {entry.name}{suffix}')
+            if entry.is_dir():
+                _walk(entry, prefix + extension)
+
+    _walk(data_root)
+    out_path.write_text('\n'.join(lines), encoding='utf-8')
+    print(f'Done! Check {out_path.resolve()}')
+
+
+def print_assignments_terminal(
+    semesters:  list[Semester],
+    records:    list[EssayRecord],
 ) -> None:
     """
-    For each semester, print the first assignment's first student submission.
+    For each semester, print the first assignment's first student submission. (Last submission for the student if they have multiple pdfs)
     Shows: semester code, assignment name, and extracted text content.
     """
+    # Index records by (semester_canvas_id, assignment) for fast lookup
     record_index: dict[tuple[str, str], EssayRecord] = {}
     for rec in records:
         key = (rec.semester.canvas_id, rec.assignment)
@@ -522,13 +568,15 @@ def print_assignments(
             record_index[key] = rec
 
     print()
-    print('ASSIGNMENT CONTENTS (first assignment, first student per semester)')
+    print('ASSIGNMENT CONTENTS (first assignment, first student per semester, last submission for the student if they have multiple pdfs)')
     print('=' * 60)
 
     for sem in semesters:
         submissions_dir = sem.path / 'submissions'
         if not submissions_dir.is_dir():
             continue
+
+        # Find the first assignment folder alphabetically
         assign_dirs = sorted(
             d for d in submissions_dir.iterdir() if d.is_dir()
         )
@@ -536,10 +584,9 @@ def print_assignments(
             print(f'\n[{sem.code}] No assignment folders found.')
             continue
 
-        first_assign_dir = assign_dirs[0]
-        assignment_name  = (
-            _match_assignment(first_assign_dir.name) or first_assign_dir.name
-        )
+        first_assign_dir  = assign_dirs[0]
+        assignment_name   = _match_assignment(first_assign_dir.name) or first_assign_dir.name
+
         key = (sem.canvas_id, assignment_name)
         rec = record_index.get(key)
 
@@ -550,13 +597,66 @@ def print_assignments(
         if rec is None or not rec.text:
             print('  [no text available for this assignment]')
         else:
+            # Wrap text for readable terminal output
+            wrapped = textwrap.fill(rec.text, width=72, initial_indent='  ',
+                                    subsequent_indent='  ')
+            print(wrapped)
+
+        print()
+
+
+def print_assignments(
+    semesters: list[Semester],
+    records:   list[EssayRecord],
+) -> None:
+    out_path = OUTPUT_DIR / 'assignments.txt'
+    lines: list[str] = []
+    lines.append('ASSIGNMENT CONTENTS (first assignment, first student per semester, last submission for the student if they have multiple pdfs)')
+    lines.append('=' * 60)
+
+    record_index: dict[tuple[str, str], EssayRecord] = {}
+    for rec in records:
+        key = (rec.semester.canvas_id, rec.assignment)
+        if key not in record_index:
+            record_index[key] = rec
+
+    for sem in semesters:
+        submissions_dir = sem.path / 'submissions'
+        if not submissions_dir.is_dir():
+            continue
+
+        assign_dirs = sorted(
+            d for d in submissions_dir.iterdir() if d.is_dir()
+        )
+        if not assign_dirs:
+            lines.append(f'\n[{sem.code}] No assignment folders found.')
+            continue
+
+        first_assign_dir = assign_dirs[0]
+        assignment_name  = (
+            _match_assignment(first_assign_dir.name) or first_assign_dir.name
+        )
+        key = (sem.canvas_id, assignment_name)
+        rec = record_index.get(key)
+
+        lines.append('')
+        lines.append(f'Semester   : {sem.code}  ({sem.era})')
+        lines.append(f'Assignment : {assignment_name}')
+        lines.append('-' * 60)
+
+        if rec is None or not rec.text:
+            lines.append('  [no text available for this assignment]')
+        else:
             wrapped = textwrap.fill(
                 rec.text, width=72,
                 initial_indent='  ', subsequent_indent='  ',
             )
-            print(wrapped)
+            lines.append(wrapped)
 
-        print()
+        lines.append('')
+
+    out_path.write_text('\n'.join(lines), encoding='utf-8')
+    print(f'Done! Check {out_path.resolve()}')
 
 # =============================================================================
 # 12. Ingestion entry point
