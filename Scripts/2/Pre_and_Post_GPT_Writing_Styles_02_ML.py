@@ -101,10 +101,13 @@ def _parse_args() -> argparse.Namespace:
             python Pre_and_Post_GPT_Writing_Styles_02_ML.py --use-fake-data --print-assignments
 
             # 3. Demo mode, silent (just write output)
-            python Pre_and_Post_GPT_Writing_Styles_02_ML.py --use-fake-data
+            python Pre_and_Post_GPT_Writing_Styles_01_Expert.py --use-fake-data
 
-            # 4. Real data, print architecture
-            python Pre_and_Post_GPT_Writing_Styles_02_ML.py --print-architecture
+            # 4. Demo mode, just print the architecture and assignments
+            python Pre_and_Post_GPT_Writing_Styles_01_Expert.py --use-fake-data --skip-analysis --print-architecture --print-assignments
+
+            # 5. Real data, print architecture
+            python Pre_and_Post_GPT_Writing_Styles_01_Expert.py --print-architecture
         '''),
     )
     parser.add_argument(
@@ -121,6 +124,11 @@ def _parse_args() -> argparse.Namespace:
         '--print-assignments', '-p',
         action='store_true',
         help='Print the first assignment (first student, last submission for the student if they have multiple pdfs) from each semester.',
+    )
+    parser.add_argument(
+        '--skip-analysis', '-s',
+        action='store_true',
+        help='Walk and write txt files only; skip PDF loading and analysis.',
     )
     return parser.parse_args()
 
@@ -252,11 +260,12 @@ def iter_essay_records(semesters: list[Semester]) -> Iterator[EssayRecord]:
     sub_re = re.compile(r'^\d+_')
 
     for sem in semesters:
-        submissions_dir = sem.path / 'submissions'
-        if not submissions_dir.is_dir():
+        submissions_dir = next((d for d in sem.path.iterdir() if d.is_dir() and d.name.lower() == 'submissions'), None)
+        if not submissions_dir:
             print(f'  [warn] no submissions/ folder in {sem.path.name}')
             continue
 
+        # Build a map of assignment_name -> folder for fast lookup
         found_assign_dirs: dict[str, Path] = {}
         for d in submissions_dir.iterdir():
             if not d.is_dir():
@@ -265,12 +274,14 @@ def iter_essay_records(semesters: list[Semester]) -> Iterator[EssayRecord]:
             if matched:
                 found_assign_dirs[matched] = d
 
+        # Report configured assignments that are absent for this semester
         for configured_assignment in ASSIGNMENTS:
             if configured_assignment not in found_assign_dirs:
                 print(
                     f'  [info] {sem.code} has no {configured_assignment}'
                 )
 
+        # Yield records for assignments that do exist
         for assignment, assign_dir in sorted(found_assign_dirs.items()):
             for student_dir in sorted(assign_dir.iterdir()):
                 if not student_dir.is_dir() or not sub_re.match(student_dir.name):
@@ -518,36 +529,30 @@ def print_architecture_terminal(data_root: Path) -> None:
     print('=' * 60)
     print(data_root.resolve())
 
-    def _walk(path: Path, prefix: str = '') -> None:
-        entries = sorted(path.iterdir())
-        for i, entry in enumerate(entries):
-            connector = '|-- '
-            extension = '|   ' if i < len(entries) - 1 else '    '
-            print(f'{prefix}{connector}{entry.name}')
-            if entry.is_dir():
-                _walk(entry, prefix + extension)
+    for dirpath, _, filenames in os.walk(data_root):
+        depth = dirpath.replace(str(data_root), '').count(os.sep)
+        prefix = '|   ' * depth
+        dirname = os.path.basename(dirpath) or str(data_root)
+        print(f'{prefix}|-- {dirname}')
+        for f in sorted(filenames):
+            print(f'{prefix}|   |-- {f}')
 
-    _walk(data_root)
     print()
 
 
 def print_architecture(data_root: Path) -> None:
     out_path = OUTPUT_DIR / 'structure.txt'
     lines: list[str] = []
-    lines.append(f'[DIR]  {data_root.resolve()}/')
+    lines.append(f'[DIR]  {data_root.parent.resolve()}/')
 
-    def _walk(path: Path, prefix: str = '') -> None:
-        entries = sorted(path.iterdir())
-        for i, entry in enumerate(entries):
-            connector  = '|-- '
-            extension  = '|   ' if i < len(entries) - 1 else '    '
-            tag        = '[DIR] ' if entry.is_dir() else '[FILE]'
-            suffix     = '/' if entry.is_dir() else ''
-            lines.append(f'{prefix}{connector}{tag}  {entry.name}{suffix}')
-            if entry.is_dir():
-                _walk(entry, prefix + extension)
+    for dirpath, _, filenames in os.walk(data_root):
+        depth = dirpath.replace(str(data_root), '').count(os.sep)
+        prefix = '|   ' * depth
+        dirname = os.path.basename(dirpath) or str(data_root)
+        lines.append(f'{prefix}|-- [DIR]  {dirname}/')
+        for f in sorted(filenames):
+            lines.append(f'{prefix}|   |-- [FILE] {f}')
 
-    _walk(data_root)
     out_path.write_text('\n'.join(lines), encoding='utf-8')
     print(f'Done! Check {out_path.resolve()}')
 
@@ -572,8 +577,8 @@ def print_assignments_terminal(
     print('=' * 60)
 
     for sem in semesters:
-        submissions_dir = sem.path / 'submissions'
-        if not submissions_dir.is_dir():
+        submissions_dir = next((d for d in sem.path.iterdir() if d.is_dir() and d.name.lower() == 'submissions'), None)
+        if not submissions_dir:
             continue
 
         # Find the first assignment folder alphabetically
@@ -621,8 +626,8 @@ def print_assignments(
             record_index[key] = rec
 
     for sem in semesters:
-        submissions_dir = sem.path / 'submissions'
-        if not submissions_dir.is_dir():
+        submissions_dir = next((d for d in sem.path.iterdir() if d.is_dir() and d.name.lower() == 'submissions'), None)
+        if not submissions_dir:
             continue
 
         assign_dirs = sorted(
@@ -664,6 +669,7 @@ def print_assignments(
 
 def run_ingestion(
     demo_mode: bool,
+    walk_only: bool = False
 ) -> tuple[list[Semester], list[EssayRecord], pd.DataFrame, dict]:
     if demo_mode:
         print('[demo] Demo mode ON -- generating synthetic data.')
@@ -686,6 +692,9 @@ def run_ingestion(
 
     raw_records = list(iter_essay_records(semesters))
     print(f'[info] Discovered {len(raw_records)} submission(s).')
+
+    if walk_only:
+        return semesters, [], pd.DataFrame(), {}
 
     records     = load_records(raw_records)
     print(f'[info] Loaded {len(records)} submission(s) with non-empty text.')
@@ -1259,11 +1268,13 @@ def plot_feature_importance(
 
 
 def plot_embedding(
-    feature_df: pd.DataFrame,
-    coords:     np.ndarray,
-    label_col:  str   = 'label',
-    method:     str   = 'UMAP',
-    figsize:    tuple = (8, 6),
+    feature_df:    pd.DataFrame,
+    coords:        np.ndarray,
+    importance_df: pd.DataFrame | None = None,
+    label_col:     str   = 'label',
+    method:        str   = 'UMAP',
+    top_n_labels:  int   = 2,
+    figsize:        tuple = (8, 6),
 ) -> plt.Figure:
     labels  = feature_df[label_col].values
     markers = ['o', 's', '^', 'D', 'v', 'P']
@@ -1276,9 +1287,51 @@ def plot_embedding(
             marker=markers[i % len(markers)],
             s=80, alpha=0.85, edgecolors='white', linewidths=0.5,
         )
-    ax.set_xlabel(f'{method} 1')
-    ax.set_ylabel(f'{method} 2')
-    ax.set_title(f'Essay Embedding Space ({method})', fontweight='bold')
+
+    def _dim_label(dim: int) -> str:
+        """
+        Correlate UMAP coords[:,dim] with every numeric feature column and
+        return a label naming the top_n_labels strongest Spearman correlates.
+
+        (Spearman > Pearson because because UMAP coordinates are not
+        linearly structured, and because the feature distributions
+        are unlikely to be normal)
+        
+        Falls back to a plain 'Stylistic Dimension N' if importance_df is
+        absent or correlation cannot be computed.
+        """
+        base = f'Stylistic Dimension {dim + 1}'
+        if importance_df is None or importance_df.empty:
+            return base
+
+        meta  = {'label', 'essay_index'}
+        feats = [c for c in feature_df.columns if c not in meta]
+        if not feats:
+            return base
+
+        from scipy.stats import spearmanr
+        correlations: list[tuple[float, str]] = []
+        for feat in feats:
+            col = feature_df[feat].fillna(0).values
+            r, _ = spearmanr(coords[:, dim], col)
+            if not np.isnan(r):
+                correlations.append((abs(r), feat))
+
+        if not correlations:
+            return base
+
+        top = sorted(correlations, reverse=True)[:top_n_labels]
+        names = ', '.join(_prettify(f) for _, f in top)
+        return f'{base}\n(strongest correlates: {names})'
+
+    ax.set_xlabel(_dim_label(0), fontsize=10)
+    ax.set_ylabel(_dim_label(1), fontsize=10)
+    ax.set_title(
+        f'Essay Stylistic Space ({method})\n'
+        f'Nearby points share similar writing style profiles',
+        fontweight='bold',
+    )
+    
     ax.legend(framealpha=0.9)
     return fig
 
@@ -1469,7 +1522,11 @@ def run_ml_discovery(
     coords    = reduce_dimensions(
         feature_df, method=reduction, random_state=random_state,
     )
-    fig_embed = plot_embedding(feature_df, coords, method=reduction.upper())
+    fig_embed = plot_embedding(
+        feature_df, coords,
+        importance_df=importance_df,
+        method=reduction.upper(),
+    )
     fig_embed.savefig(
         OUTPUT_DIR / 'embedding.png', dpi=130, bbox_inches='tight',
     )
@@ -1494,7 +1551,7 @@ def run_ml_discovery(
 
 def main() -> None:
     # ------------------------------------------------------------------ ingest
-    semesters, records, summary_df, corpus = run_ingestion(ARGS.use_fake_data)
+    semesters, records, summary_df, corpus = run_ingestion(ARGS.use_fake_data, walk_only=ARGS.skip_analysis)
 
     # ----------------------------------------------------------- diagnostics
     if ARGS.print_architecture:
@@ -1513,6 +1570,10 @@ def main() -> None:
             print_assignments(semesters, records)
         else:
             print('[info] No data loaded; --print-assignments has nothing to show.')
+
+    if ARGS.skip_analysis:
+        print('[info] Skip-analysis mode complete.')
+        return
 
     # --------------------------------------------------------- guard: no data
     if not records:

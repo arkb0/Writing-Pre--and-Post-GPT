@@ -80,7 +80,14 @@ python 2/Pre_and_Post_GPT_Writing_Styles_02_ML.py     --use-fake-data
 ```
 Expected: no diagnostic output beyond ingestion progress lines; all results written to their respective output dirs.
 
-**4 - Real data, print architecture**
+**4 - Real data, debug only, no analysis**
+```bash
+python 1/Pre_and_Post_GPT_Writing_Styles_01_Expert.py --print-architecture --print-assignments --skip-analysis
+python 2/Pre_and_Post_GPT_Writing_Styles_02_ML.py     --print-architecture --print-assignments --skip-analysis
+```
+Expected: reads from `(project_root)/data/`, prints the directory tree and first assignment name and text, writes to their respective output dirs.
+
+**5 - Real data, print architecture**
 ```bash
 python 1/Pre_and_Post_GPT_Writing_Styles_01_Expert.py --print-architecture
 python 2/Pre_and_Post_GPT_Writing_Styles_02_ML.py     --print-architecture

@@ -96,7 +96,10 @@ def _parse_args() -> argparse.Namespace:
             # 3. Demo mode, silent (just write output)
             python Pre_and_Post_GPT_Writing_Styles_01_Expert.py --use-fake-data
 
-            # 4. Real data, print architecture
+            # 4. Demo mode, just print the architecture and assignments
+            python Pre_and_Post_GPT_Writing_Styles_01_Expert.py --use-fake-data --skip-analysis --print-architecture --print-assignments
+
+            # 5. Real data, print architecture
             python Pre_and_Post_GPT_Writing_Styles_01_Expert.py --print-architecture
         '''),
     )
@@ -114,6 +117,11 @@ def _parse_args() -> argparse.Namespace:
         '--print-assignments', '-p',
         action='store_true',
         help='Print the first assignment (first student, last submission for the student if they have multiple pdfs) from each semester.',
+    )
+    parser.add_argument(
+        '--skip-analysis', '-s',
+        action='store_true',
+        help='Walk and write txt files only; skip PDF loading and analysis.',
     )
     return parser.parse_args()
 
@@ -245,8 +253,8 @@ def iter_essay_records(semesters: list[Semester]) -> Iterator[EssayRecord]:
     sub_re = re.compile(r'^\d+_')
 
     for sem in semesters:
-        submissions_dir = sem.path / 'submissions'
-        if not submissions_dir.is_dir():
+        submissions_dir = next((d for d in sem.path.iterdir() if d.is_dir() and d.name.lower() == 'submissions'), None)
+        if not submissions_dir:
             print(f'  [warn] no submissions/ folder in {sem.path.name}')
             continue
 
@@ -518,36 +526,30 @@ def print_architecture_terminal(data_root: Path) -> None:
     print('=' * 60)
     print(data_root.resolve())
 
-    def _walk(path: Path, prefix: str = '') -> None:
-        entries = sorted(path.iterdir())
-        for i, entry in enumerate(entries):
-            connector = '|-- '
-            extension = '|   ' if i < len(entries) - 1 else '    '
-            print(f'{prefix}{connector}{entry.name}')
-            if entry.is_dir():
-                _walk(entry, prefix + extension)
+    for dirpath, _, filenames in os.walk(data_root):
+        depth = dirpath.replace(str(data_root), '').count(os.sep)
+        prefix = '|   ' * depth
+        dirname = os.path.basename(dirpath) or str(data_root)
+        print(f'{prefix}|-- {dirname}')
+        for f in sorted(filenames):
+            print(f'{prefix}|   |-- {f}')
 
-    _walk(data_root)
     print()
 
 
 def print_architecture(data_root: Path) -> None:
     out_path = OUTPUT_DIR / 'structure.txt'
     lines: list[str] = []
-    lines.append(f'[DIR]  {data_root.resolve()}/')
+    lines.append(f'[DIR]  {data_root.parent.resolve()}/')
 
-    def _walk(path: Path, prefix: str = '') -> None:
-        entries = sorted(path.iterdir())
-        for i, entry in enumerate(entries):
-            connector  = '|-- '
-            extension  = '|   ' if i < len(entries) - 1 else '    '
-            tag        = '[DIR] ' if entry.is_dir() else '[FILE]'
-            suffix     = '/' if entry.is_dir() else ''
-            lines.append(f'{prefix}{connector}{tag}  {entry.name}{suffix}')
-            if entry.is_dir():
-                _walk(entry, prefix + extension)
+    for dirpath, _, filenames in os.walk(data_root):
+        depth = dirpath.replace(str(data_root), '').count(os.sep)
+        prefix = '|   ' * depth
+        dirname = os.path.basename(dirpath) or str(data_root)
+        lines.append(f'{prefix}|-- [DIR]  {dirname}/')
+        for f in sorted(filenames):
+            lines.append(f'{prefix}|   |-- [FILE] {f}')
 
-    _walk(data_root)
     out_path.write_text('\n'.join(lines), encoding='utf-8')
     print(f'Done! Check {out_path.resolve()}')
 
@@ -572,8 +574,8 @@ def print_assignments_terminal(
     print('=' * 60)
 
     for sem in semesters:
-        submissions_dir = sem.path / 'submissions'
-        if not submissions_dir.is_dir():
+        submissions_dir = next((d for d in sem.path.iterdir() if d.is_dir() and d.name.lower() == 'submissions'), None)
+        if not submissions_dir:
             continue
 
         # Find the first assignment folder alphabetically
@@ -621,8 +623,8 @@ def print_assignments(
             record_index[key] = rec
 
     for sem in semesters:
-        submissions_dir = sem.path / 'submissions'
-        if not submissions_dir.is_dir():
+        submissions_dir = next((d for d in sem.path.iterdir() if d.is_dir() and d.name.lower() == 'submissions'), None)
+        if not submissions_dir:
             continue
 
         assign_dirs = sorted(
@@ -662,7 +664,7 @@ def print_assignments(
 # 12. Ingestion entry point
 # =============================================================================
 
-def run_ingestion(demo_mode: bool) -> tuple[list[Semester], list[EssayRecord], pd.DataFrame, LabelledCorpus]:
+def run_ingestion(demo_mode: bool, walk_only: bool = False) -> tuple[list[Semester], list[EssayRecord], pd.DataFrame, LabelledCorpus]:
     """
     Resolve data root, discover semesters, load records, assemble corpus.
     Returns early with empty structures if the data root does not exist
@@ -689,6 +691,9 @@ def run_ingestion(demo_mode: bool) -> tuple[list[Semester], list[EssayRecord], p
 
     raw_records = list(iter_essay_records(semesters))
     print(f'[info] Discovered {len(raw_records)} submission(s).')
+
+    if walk_only:
+        return semesters, [], pd.DataFrame(), {}
 
     records     = load_records(raw_records)
     print(f'[info] Loaded {len(records)} submission(s) with non-empty text.')
@@ -1203,7 +1208,7 @@ causes and consequences continues to shape our understanding of modern democracy
 
 def main() -> None:
     # ------------------------------------------------------------------ ingest
-    semesters, records, summary_df, corpus = run_ingestion(ARGS.use_fake_data)
+    semesters, records, summary_df, corpus = run_ingestion(ARGS.use_fake_data, walk_only=ARGS.skip_analysis)
 
     # ----------------------------------------------------------- diagnostics
     if ARGS.print_architecture:
