@@ -10,6 +10,7 @@ import string
 import textwrap
 import tempfile
 import warnings
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Protocol
@@ -163,6 +164,15 @@ ASSIGNMENTS: list[str] = [
 CHATGPT_CUTOFF_YYYYMM: int = 202208
 MAX_CHARS_PER_PAGE: int    = 50_000
 
+# Helper for anonymisation
+def pseudonymise(value: str, prefix: str = "SID") -> str:
+    """
+    Deterministically map a student_id string to a pseudonym.
+    Uses SHA256 hash truncated to 8 hex chars.
+    """
+    h = hashlib.sha256(value.encode('utf-8')).hexdigest()[:8]
+    return f'{prefix}_{h}'
+
 # =============================================================================
 # 6. Data model
 # =============================================================================
@@ -194,8 +204,12 @@ class EssayRecord:
     text:         str = field(default='', repr=False)
 
     @property
+    def anon_id(self) -> str:
+        return pseudonymise(self.student_id)
+
+    @property
     def uid(self) -> str:
-        return f'{self.semester.canvas_id}__{self.assignment}__{self.student_id}'
+        return f'{self.semester.canvas_id}__{self.assignment}__{self.anon_id}'
 
 # =============================================================================
 # 7. Folder parsing
@@ -498,7 +512,7 @@ def summarise_corpus(records: list[EssayRecord]) -> pd.DataFrame:
             'yyyymm':     rec.semester.yyyymm,
             'era':        rec.semester.era,
             'assignment': rec.assignment,
-            'student_id': rec.student_id,
+            'student_id': rec.anon_id,
             'word_count': len(rec.text.split()),
             'uid':        rec.uid,
         }
