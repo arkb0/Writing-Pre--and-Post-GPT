@@ -16,32 +16,53 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 # =============================================================================
+# 0. For Windows, with love...
+# =============================================================================
+
+import sys
+
+if sys.platform == 'win32':
+    import ctypes
+
+    def enable_ansi_support():
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint()
+        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+        kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+
+    enable_ansi_support()
+
+# =============================================================================
 # 1. Dependency installation
 # =============================================================================
 
+def progress_bar(current: int, total: int, prefix: str = '') -> None:
+    bar_len = 50
+    filled_len = int(bar_len * current // total)
+    bar = '█' * filled_len + '-' * (bar_len - filled_len)
+    percent = (100 * current) // total
+    # No newline on completion - handle that at the call site
+    print(f'\r{prefix} |{bar}| {percent:3d}% ({current}/{total})', end='', flush=True)
+
 def _pip(*args):
-    import threading
-    import itertools
-
-    done  = threading.Event()
-    frames = itertools.cycle(['-', '\\', '|', '/'])
-
-    def _spin():
-        while not done.wait(0.1):
-            print(f'\r  installing... {next(frames)}', end='', flush=True)
-
-    t = threading.Thread(target=_spin, daemon=True)
-    t.start()
-    try:
-        subprocess.check_call(
-            [sys.executable, '-m', 'pip', 'install', '--quiet', *args],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    finally:
-        done.set()
-        t.join()
-        print('\r  installing... done.   ')
+    total = len(args)
+    for i, pkg in enumerate(args, start=1):
+        # print progress bar first
+        progress_bar(i, total, prefix='Dependencies')
+        # then overwrite same line with extra info
+        sys.stdout.write(f' Installing {i}/{total}: {pkg}'.ljust(40))
+        sys.stdout.flush()
+        try:
+            subprocess.check_call(
+                [sys.executable, '-m', 'pip', 'install', '--quiet', pkg],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            sys.stdout.write('\n')  # move to new line for warning
+            print(f'  [warn] could not install {pkg}: {exc}')
+    sys.stdout.write("\n[info] All dependencies installed.\n")
 
 _pip(
     'nltk>=3.8', 'spacy>=3.7', 'numpy>=1.26', 'pandas>=2.1',
@@ -236,11 +257,18 @@ def _match_assignment(folder_name: str) -> str | None:
 
 
 def discover_semesters(data_root: Path) -> list[Semester]:
+    print('[step] Discovering semesters...')
     semesters: list[Semester] = []
-    for entry in sorted(data_root.iterdir()):
+    entries = sorted(data_root.iterdir())
+    total = len(entries)
+    for i, entry in enumerate(entries, start=1):
         if not entry.is_dir():
             continue
         m = _FOLDER_RE.match(entry.name)
+        progress_bar(i, total, prefix='Scanning semester folders')
+        # If we 100%'d, now break the line
+        if i == total:
+            sys.stdout.write('\n')
         if not m:
             continue
         course_label = _match_course(m.group('course_slug'))
@@ -264,10 +292,12 @@ def iter_essay_records(semesters: list[Semester]) -> Iterator[EssayRecord]:
     For every configured assignment that has no matching folder inside a
     semester, a clear CLI message is printed and iteration continues.
     """
+    print('[step] Iterating essay records...')
     sub_re = re.compile(r'^\d+_')
 
     for sem in semesters:
         submissions_dir = next((d for d in sem.path.iterdir() if d.is_dir() and d.name.lower() == 'submissions'), None)
+        
         if not submissions_dir:
             print(f'  [warn] no submissions/ folder in {sem.path.name}')
             continue
@@ -289,7 +319,10 @@ def iter_essay_records(semesters: list[Semester]) -> Iterator[EssayRecord]:
                 )
 
         # Yield records for assignments that do exist
-        for assignment, assign_dir in sorted(found_assign_dirs.items()):
+        assign_items = sorted(found_assign_dirs.items())
+        total_assigns = len(assign_items)
+        for j, (assignment, assign_dir) in enumerate(assign_items, start=1):
+            progress_bar(j, total_assigns, prefix=f'Scanning {sem.code}')
             for student_dir in sorted(assign_dir.iterdir()):
                 if not student_dir.is_dir() or not sub_re.match(student_dir.name):
                     continue
@@ -310,6 +343,9 @@ def iter_essay_records(semesters: list[Semester]) -> Iterator[EssayRecord]:
                     student_name = student_name,
                     pdf_path     = sorted(pdfs)[-1], # 0 for first, -1 for last
                 )
+            # If we 100%'d, now break the line
+            if j == total_assigns:
+                sys.stdout.write('\n')
 
 # =============================================================================
 # 8. PDF extraction
@@ -327,18 +363,30 @@ def extract_text_from_pdf(path: Path, *, max_chars: int = MAX_CHARS_PER_PAGE) ->
         return full.strip()
     except Exception as exc:
         print(f'  [warn] could not extract {path.name}: {exc}')
+
+        # Error logging
+        error_log_dir = Path('output_confidential')
+        error_log_dir.mkdir(exist_ok=True)
+        with open(error_log_dir / 'errored_pdfs.txt', 'a', encoding='utf-8') as f:
+            f.write(f'{str(path)}\n')  # Canvas downloads often name every student's file submission.pdf => We need the full path to know which pdfs errored out
+
         return ''
 
 
 def load_records(records: list[EssayRecord]) -> list[EssayRecord]:
     loaded: list[EssayRecord] = []
-    for rec in records:
+    total = len(records)
+    for i, rec in enumerate(records, start=1):
         text = extract_text_from_pdf(rec.pdf_path)
         if not text:
-            print(f'  [warn] empty text for {rec.uid}; skipping')
+            print(f'\n  [warn] empty text for {rec.uid}; skipping')
             continue
         rec.text = text
         loaded.append(rec)
+        progress_bar(i, total, prefix='Loading submissions')
+        # If we 100%'d, now break the line
+        if i == total:
+            sys.stdout.write('\n')
     return loaded
 
 # =============================================================================
@@ -431,11 +479,14 @@ def build_demo_corpus(root: Path, *, random_seed: int = 42) -> None:
         ('202308', 'FA23', '100007'),
     ]
 
+    print('[step] Building synthetic demo corpus...')
+
     # Base assignments that every semester always receives
     base_assignments = [a for a in ASSIGNMENTS if a != 'Assignment_4']
     course_slug      = COURSES[0][0] if COURSES else 'CS6460'
 
     for yyyymm, code, canvas_id in fake_semesters:
+        print(f"  [demo] Generating semester {code} ({yyyymm})...")
         era_cutoff = int(yyyymm) <= CHATGPT_CUTOFF_YYYYMM
         template   = _PRE_AI_TEMPLATE if era_cutoff else _POST_AI_TEMPLATE
 
@@ -484,8 +535,10 @@ def assemble_corpus(
     *,
     group_by: str = 'era',
 ) -> LabelledCorpus:
+    print('[step] Assembling corpus...')
     corpus: dict[str, list[str]] = {}
-    for rec in records:
+    total = len(records)
+    for i, rec in enumerate(records, start=1):
         match group_by:
             case 'era':
                 key = rec.semester.era
@@ -498,11 +551,16 @@ def assemble_corpus(
                     f"group_by must be 'era', 'semester', or 'assignment'; "
                     f"got '{group_by}'"
                 )
+        progress_bar(i, total, prefix='Grouping records')
+        # If we 100%'d, now break the line
+        if i == total:
+            sys.stdout.write('\n')
         corpus.setdefault(key, []).append(rec.text)
     return corpus
 
 
 def summarise_corpus(records: list[EssayRecord]) -> pd.DataFrame:
+    print('[step] Summarising corpus...')
     rows = [
         {
             'semester':   rec.semester.code,
@@ -524,6 +582,7 @@ def summarise_corpus(records: list[EssayRecord]) -> pd.DataFrame:
           .rename('n_essays')
           .to_string()
     )
+    print(f'[info] Summary written with {len(df)} rows.')
     return df
 
 # =============================================================================
@@ -684,6 +743,7 @@ def run_ingestion(demo_mode: bool, walk_only: bool = False) -> tuple[list[Semest
     Returns early with empty structures if the data root does not exist
     (vacuous success for no-data + no-print runs).
     """
+    print('[step] Starting ingestion...')
     if demo_mode:
         print('[demo] Demo mode ON -- generating synthetic data.')
         _demo_root = Path(tempfile.mkdtemp(prefix='essay_demo_'))
