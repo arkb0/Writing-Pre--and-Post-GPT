@@ -223,6 +223,8 @@ class EssayRecord:
     student_name: str
     pdf_path:     Path
     text:         str = field(default='', repr=False)
+    features:     dict[str, float] = field(default_factory=dict, repr=False)
+    word_count:   int = field(default=0)
 
     @property
     def anon_id(self) -> str:
@@ -371,12 +373,19 @@ def extract_text_from_pdf(path: Path, *, max_chars: int = MAX_CHARS_PER_PAGE) ->
     except Exception as exc:
         print(f'  [warn] could not extract {path.name}: {exc}')
 
-        # Error logging
+        # Error logging - This is a right buffet of PII, so we use a separate directory
         error_log_dir = Path('output_confidential')
         error_log_dir.mkdir(exist_ok=True)
-        with open(error_log_dir / 'errored_pdfs.txt', 'a', encoding='utf-8') as f:
-            f.write(f'{str(path)}\n')  # Canvas downloads often name every student's file submission.pdf => We need the full path to know which pdfs errored out
-            
+        
+        csv_file = error_log_dir / 'errored_pdfs_2_ml.csv'
+        write_header = not csv_file.exists()
+        
+        with open(csv_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(['filename', 'exception'])
+            writer.writerow([str(path), str(exc)]) # str(path) : Canvas downloads often name every student's file submission.pdf => We need the full path to know which pdfs errored out
+
         return ''
 
 
@@ -388,7 +397,22 @@ def load_records(records: list[EssayRecord]) -> list[EssayRecord]:
         if not text:
             print(f'\n  [warn] empty text for {rec.uid}; skipping')
             continue
-        rec.text = text
+
+        # 1. Store immediate surface values needed for summary stats
+        rec.word_count = len(text.split())
+        
+        # 2. Precompute all heavy feature extractions before discarding text
+        try:
+            rec.features = extract_features(text)
+        except Exception as exc:
+            print(f'  [warn] extractor failed on {rec.uid}: {exc}')
+            rec.features = {}
+        
+        # 3. Discard heavy raw text block to drop memory usage down to zero
+        rec.text = ''
+
+        # RAM Optimisation
+        # rec.text = text
         loaded.append(rec)
         progress_bar(i, total, prefix='Loading submissions')
         # If we 100%'d, now break the line
@@ -539,7 +563,9 @@ def assemble_corpus(
     group_by: str = 'era',
 ) -> LabelledCorpus:
     print('[step] Assembling corpus...')
-    corpus: dict[str, list[str]] = {}
+    # corpus: dict[str, list[str]] = {}
+    # Optimising for RAM...
+    corpus: dict[str, list[dict[str, float]]] = {}
     total = len(records)
     for i, rec in enumerate(records, start=1):
         match group_by:
@@ -558,7 +584,9 @@ def assemble_corpus(
         # If we 100%'d, now break the line
         if i == total:
             sys.stdout.write('\n')
-        corpus.setdefault(key, []).append(rec.text)
+        # corpus.setdefault(key, []).append(rec.text)
+        # Optimising for RAM...
+        corpus.setdefault(key, []).append(rec.features)
     return corpus
 
 
@@ -571,7 +599,7 @@ def summarise_corpus(records: list[EssayRecord]) -> pd.DataFrame:
             'era':        rec.semester.era,
             'assignment': rec.assignment,
             'student_id': rec.anon_id,
-            'word_count': len(rec.text.split()),
+            'word_count': rec.word_count, # Precomputed value
             'uid':        rec.uid,
         }
         for rec in records
@@ -1098,6 +1126,8 @@ def build_feature_matrix(
     corpus: dict, extractors: list | None = None,
 ) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
+    # Optimising for RAM
+    '''
     for label, essays in corpus.items():
         for i, essay in enumerate(essays):
             try:
@@ -1106,6 +1136,10 @@ def build_feature_matrix(
                 print(f'  [warn] extractor failed on {label}[{i}]: {exc}')
                 feats = {}
             rows.append({'label': label, 'essay_index': i, **feats})
+    '''
+    for label, features_list in corpus.items():
+        for i, precomputed_feats in enumerate(features_list):
+            rows.append({'label': label, 'essay_index': i, **precomputed_feats})
     df        = pd.DataFrame(rows)
     meta_cols = {'label', 'essay_index'}
     num_cols  = [c for c in df.columns if c not in meta_cols]
@@ -1641,7 +1675,8 @@ def main() -> None:
 
     if ARGS.print_assignments:
         if semesters and records:
-            print_assignments(semesters, records)
+            # Re-read raw strings on demand for CLI inspection to keep execution footprint lean
+            print_assignments(semesters, raw_records)
         else:
             print('[info] No data loaded; --print-assignments has nothing to show.')
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import subprocess
 import sys
 import os
@@ -216,6 +217,7 @@ class EssayRecord:
     student_name: str
     pdf_path:     Path
     text:         str = field(default='', repr=False)
+    metrics:      Optional[EssayMetrics] = field(default=None, repr=False)
 
     @property
     def anon_id(self) -> str:
@@ -364,11 +366,18 @@ def extract_text_from_pdf(path: Path, *, max_chars: int = MAX_CHARS_PER_PAGE) ->
     except Exception as exc:
         print(f'  [warn] could not extract {path.name}: {exc}')
 
-        # Error logging
+        # Error logging - This is a right buffet of PII, so we use a separate directory
         error_log_dir = Path('output_confidential')
         error_log_dir.mkdir(exist_ok=True)
-        with open(error_log_dir / 'errored_pdfs.txt', 'a', encoding='utf-8') as f:
-            f.write(f'{str(path)}\n')  # Canvas downloads often name every student's file submission.pdf => We need the full path to know which pdfs errored out
+        
+        csv_file = error_log_dir / 'errored_pdfs_1_em.csv'
+        write_header = not csv_file.exists()
+        
+        with open(csv_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(['filename', 'exception'])
+            writer.writerow([str(path), str(exc)]) # str(path) : Canvas downloads often name every student's file submission.pdf => We need the full path to know which pdfs errored out
 
         return ''
 
@@ -381,7 +390,13 @@ def load_records(records: list[EssayRecord]) -> list[EssayRecord]:
         if not text:
             print(f'\n  [warn] empty text for {rec.uid}; skipping')
             continue
-        rec.text = text
+
+        # OPTIMISATION
+        # Compute metrics instantly while the text file is in memory
+        rec.metrics = analyse_essay(text, label=rec.semester.era)
+        rec.text = ''  # Drop the massive text block completely to save RAM
+        
+        # rec.text = text
         loaded.append(rec)
         progress_bar(i, total, prefix='Loading submissions')
         # If we 100%'d, now break the line
@@ -1052,7 +1067,7 @@ def compare_texts(
     ).round(1)
     return m1, m2, comparison
 
-
+# Deprecated
 def compare_corpora(
     corpus1: list[str],
     corpus2: list[str],
@@ -1061,6 +1076,42 @@ def compare_corpora(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     rows1 = [metrics_to_series(analyse_essay(t, label=label1)) for t in corpus1]
     rows2 = [metrics_to_series(analyse_essay(t, label=label2)) for t in corpus2]
+    df    = pd.DataFrame(rows1 + rows2)
+    numeric_cols = df.columns.difference(['label'])
+    df[numeric_cols] = df[numeric_cols].astype(float)
+    summary_rows = []
+    for col in numeric_cols:
+        g1 = df.loc[df['label'] == label1, col].dropna()
+        g2 = df.loc[df['label'] == label2, col].dropna()
+        stat, p = (
+            mannwhitneyu(g1, g2, alternative='two-sided')
+            if (len(g1) > 1 and len(g2) > 1)
+            else (np.nan, np.nan)
+        )
+        summary_rows.append({
+            'metric':          col,
+            f'{label1}_mean':  g1.mean(),
+            f'{label1}_std':   g1.std(),
+            f'{label2}_mean':  g2.mean(),
+            f'{label2}_std':   g2.std(),
+            'mann_whitney_u':  stat,
+            'p_value':         p,
+            'significant_p05': p < 0.05 if not np.isnan(p) else False,
+        })
+    summary = pd.DataFrame(summary_rows).set_index('metric')
+    return df, summary
+
+# Prefer this over the above to save RAM
+def compare_corpora_optimised(
+    records1: list[EssayRecord],
+    records2: list[EssayRecord],
+    label1:  str = 'Corpus 1',
+    label2:  str = 'Corpus 2',
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    # Extract series directly from the pre-computed metrics
+    rows1 = [metrics_to_series(rec.metrics) for rec in records1 if rec.metrics]
+    rows2 = [metrics_to_series(rec.metrics) for rec in records2 if rec.metrics]
+    
     df    = pd.DataFrame(rows1 + rows2)
     numeric_cols = df.columns.difference(['label'])
     df[numeric_cols] = df[numeric_cols].astype(float)
@@ -1332,11 +1383,24 @@ def main() -> None:
     plt.close(fig_pair)
 
     # --------------------------------------------------------- corpus analysis
-    pre_corpus  = corpus.get('Pre-ChatGPT',  [])
-    post_corpus = corpus.get('Post-ChatGPT', [])
+    # Removed to optimise for RAM
+    # pre_corpus  = corpus.get('Pre-ChatGPT',  [])
+    # post_corpus = corpus.get('Post-ChatGPT', [])
 
+    # Instead of building a text corpus dictionary, filter the lightweight records
+    pre_records  = [r for r in records if r.semester.era == 'Pre-ChatGPT']
+    post_records = [r for r in records if r.semester.era == 'Post-ChatGPT']
+
+    # Removed to optimise for RAM
+    '''
     corpus_df, summary_stats_df = compare_corpora(
         pre_corpus, post_corpus,
+        label1='Pre-ChatGPT', label2='Post-ChatGPT',
+    )
+    '''
+
+    corpus_df, summary_stats_df = compare_corpora_optimised(
+        pre_records, post_records,
         label1='Pre-ChatGPT', label2='Post-ChatGPT',
     )
 
