@@ -37,6 +37,14 @@ Both the `.sh` scripts create a venv and activate it.
 
 ***
 
+### Checkpointing
+
+The scripts now persist intermediate (default: every 100) results to `(project root)/output_confidential/`. This effectively allows the scripts to 'resume' after an interrupt, timeout, or (unlikely) crash.
+
+The `output_confidential` must **not** be deleted between runs. It should not need to be returned with the actual outputs because it may leak PII.
+
+***
+
 ### Manual Runs
 
 #### Suggested Running Sequence

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import subprocess
 import sys
 import os
@@ -33,6 +34,13 @@ if sys.platform == 'win32':
         kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
 
     enable_ansi_support()
+
+# =============================================================================
+# 0b. UTF-8 stdout (Git Bash / any non-UTF-8 terminal)
+# =============================================================================
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 # =============================================================================
 # 1. Dependency installation
@@ -185,6 +193,10 @@ ASSIGNMENTS: list[str] = [
 
 CHATGPT_CUTOFF_YYYYMM: int = 202208
 MAX_CHARS_PER_PAGE: int    = 50_000
+
+# Checkpointing Consts
+CHECKPOINT_EVERY: int  = 100
+_CHECKPOINT_PATH: Path = Path('output_confidential') / 'checkpoint_2_ml.jsonl'
 
 # Helper for anonymisation
 def pseudonymise(value: str, prefix: str = "SID") -> str:
@@ -391,9 +403,30 @@ def extract_text_from_pdf(path: Path, *, max_chars: int = MAX_CHARS_PER_PAGE) ->
 
 
 def load_records(records: list[EssayRecord]) -> list[EssayRecord]:
-    loaded: list[EssayRecord] = []
-    total = len(records)
-    for i, rec in enumerate(records, start=1):
+    # ---------------------------------------------------------------- resume
+    checkpoint = _load_checkpoint(_CHECKPOINT_PATH)
+    if checkpoint:
+        print(f'[info] Checkpoint: {len(checkpoint)} previously processed record(s) found.')
+
+    loaded:  list[EssayRecord] = []
+    pending: list[EssayRecord] = []
+
+    # Carry forward already-processed records first so the order is stable
+    seen_uids: set[str] = set()
+    for rec in records:
+        if rec.uid in checkpoint:
+            loaded.append(checkpoint[rec.uid])
+            seen_uids.add(rec.uid)
+
+    skipped = len(seen_uids)
+    if skipped:
+        print(f'[info] Skipping {skipped} already-processed record(s).')
+
+    # --------------------------------------------------------- process new ones
+    to_process = [r for r in records if r.uid not in seen_uids]
+    total      = len(to_process)
+
+    for i, rec in enumerate(to_process, start=1):
         text = extract_text_from_pdf(rec.pdf_path)
         if not text:
             print(f'\n  [warn] empty text for {rec.uid}; skipping')
@@ -415,11 +448,95 @@ def load_records(records: list[EssayRecord]) -> list[EssayRecord]:
         # RAM Optimisation
         # rec.text = text
         loaded.append(rec)
+        pending.append(rec)
+        
         progress_bar(i, total, prefix='Loading submissions')
         # If we 100%'d, now break the line
         if i == total:
             sys.stdout.write('\n')
+        # --------------------------------------------------- periodic flush
+        if len(pending) >= CHECKPOINT_EVERY:
+            _append_checkpoint(pending, _CHECKPOINT_PATH)
+            print(f'\n[info] Checkpoint: flushed {len(pending)} record(s) to {_CHECKPOINT_PATH}')
+            pending.clear()
+
+    # Final flush for any remainder
+    if pending:
+        _append_checkpoint(pending, _CHECKPOINT_PATH)
+        print(f'[info] Checkpoint: flushed {len(pending)} record(s) to {_CHECKPOINT_PATH}')
     return loaded
+
+# =============================================================================
+# 8b. Checkpoint helpers
+# =============================================================================
+
+def _record_to_checkpoint(rec: EssayRecord) -> dict:
+    """Serialise a fully-processed EssayRecord to a JSON-serialisable dict."""
+    return {
+        'uid':                rec.uid,
+        'semester_yyyymm':    rec.semester.yyyymm,
+        'semester_code':      rec.semester.code,
+        'semester_canvas_id': rec.semester.canvas_id,
+        'semester_course':    rec.semester.course,
+        'semester_path':      str(rec.semester.path),
+        'assignment':         rec.assignment,
+        'student_id':         rec.student_id,
+        'student_name':       rec.student_name,
+        'pdf_path':           str(rec.pdf_path),
+        'word_count':         rec.word_count,
+        'features':           rec.features,
+    }
+
+
+def _checkpoint_to_record(d: dict) -> EssayRecord:
+    """Reconstruct an EssayRecord (text='', features restored) from a checkpoint dict."""
+    sem = Semester(
+        yyyymm    = d['semester_yyyymm'],
+        code      = d['semester_code'],
+        canvas_id = d['semester_canvas_id'],
+        course    = d['semester_course'],
+        path      = Path(d['semester_path']),
+    )
+    return EssayRecord(
+        semester     = sem,
+        assignment   = d['assignment'],
+        student_id   = d['student_id'],
+        student_name = d['student_name'],
+        pdf_path     = Path(d['pdf_path']),
+        text         = '',
+        word_count   = d.get('word_count', 0),
+        features     = d.get('features', {}),
+    )
+
+
+def _load_checkpoint(path: Path) -> dict[str, EssayRecord]:
+    """
+    Read the checkpoint file and return a dict mapping uid -> EssayRecord.
+    Silently skips malformed lines.
+    """
+    if not path.exists():
+        return {}
+    recovered: dict[str, EssayRecord] = {}
+    with open(path, encoding='utf-8') as fh:
+        for lineno, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d   = json.loads(line)
+                rec = _checkpoint_to_record(d)
+                recovered[rec.uid] = rec
+            except Exception as exc:
+                print(f'  [warn] checkpoint line {lineno} skipped ({exc})')
+    return recovered
+
+
+def _append_checkpoint(records: list[EssayRecord], path: Path) -> None:
+    """Append a batch of records to the checkpoint file (one JSON line each)."""
+    path.parent.mkdir(exist_ok=True)
+    with open(path, 'a', encoding='utf-8') as fh:
+        for rec in records:
+            fh.write(json.dumps(_record_to_checkpoint(rec), ensure_ascii=False) + '\n')
 
 # =============================================================================
 # 9. Demo mode (synthetic data)
@@ -1676,8 +1793,8 @@ def main() -> None:
 
     if ARGS.print_assignments:
         if semesters and records:
-            # Re-read raw strings on demand for CLI inspection to keep execution footprint lean
-            print_assignments(semesters, raw_records)
+            # TODO: Re-read raw strings on demand for CLI inspection to keep execution footprint lean
+            print_assignments(semesters, records)
         else:
             print('[info] No data loaded; --print-assignments has nothing to show.')
 
